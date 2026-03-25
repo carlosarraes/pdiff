@@ -13,7 +13,7 @@ pub fn print_markdown(annotations: &[Annotation]) {
     print!("{}", format_markdown(annotations));
 }
 
-fn format_markdown(annotations: &[Annotation]) -> String {
+pub fn format_markdown(annotations: &[Annotation]) -> String {
     if annotations.is_empty() {
         return String::from("## Review Comments\n\nNo comments.\n");
     }
