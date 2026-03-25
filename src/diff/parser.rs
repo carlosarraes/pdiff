@@ -118,7 +118,7 @@ fn parse_file(lines: &[&str]) -> (Option<DiffFile>, usize) {
 
 fn parse_hunk(lines: &[&str]) -> (Hunk, usize) {
     let header = lines[0];
-    let (old_start, old_count, new_start, new_count) = parse_hunk_header(header);
+    let (old_start, _, new_start, _) = parse_hunk_header(header);
 
     let mut diff_lines = Vec::new();
     let mut old_line = old_start;
@@ -172,9 +172,7 @@ fn parse_hunk(lines: &[&str]) -> (Hunk, usize) {
     (
         Hunk {
             old_start,
-            old_count,
             new_start,
-            new_count,
             header: header.to_string(),
             lines: diff_lines,
         },

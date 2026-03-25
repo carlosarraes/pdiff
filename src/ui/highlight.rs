@@ -20,7 +20,7 @@ impl Highlighter {
 
     /// Highlight a single line of code, returning styled spans.
     /// Falls back to unstyled if the extension is unknown.
-    pub fn highlight_line<'a>(&self, content: &'a str, file_path: &str) -> Vec<Span<'a>> {
+    pub fn highlight_line(&self, content: &str, file_path: &str) -> Vec<Span<'static>> {
         let ext = file_path.rsplit('.').next().unwrap_or("");
         let syntax = self
             .syntax_set
@@ -33,7 +33,7 @@ impl Highlighter {
         let line_with_nl = format!("{}\n", content);
         let regions = match h.highlight_line(&line_with_nl, &self.syntax_set) {
             Ok(r) => r,
-            Err(_) => return vec![Span::raw(content)],
+            Err(_) => return vec![Span::raw(content.to_string())],
         };
 
         regions
@@ -43,7 +43,6 @@ impl Highlighter {
                 if text.is_empty() {
                     return None;
                 }
-                // We need to return owned Spans since we can't borrow from the formatted string
                 Some(Span::styled(
                     text.to_string(),
                     syntect_to_ratatui_style(style),

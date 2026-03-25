@@ -4,12 +4,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::annotations::model::Annotation;
-use crate::diff::model::{DiffFile, DiffLine, LineType};
+use crate::diff::model::{DiffFile, DiffLine};
 use crate::ui::highlight::Highlighter;
 use crate::ui::theme::Theme;
 use crate::vim::mode::Mode;
 
-/// A flat reference to a line within the diff
 #[derive(Debug, Clone, Copy)]
 pub struct FlatLine {
     pub file_idx: usize,
@@ -25,6 +24,8 @@ pub enum ViewLayout {
 pub struct App {
     pub files: Vec<DiffFile>,
     pub flat_lines: Vec<FlatLine>,
+    pub file_starts: Vec<usize>,
+    pub line_counts: Vec<(usize, usize)>,
     pub cursor: usize,
     pub scroll_offset: usize,
     pub mode: Mode,
@@ -36,17 +37,21 @@ pub struct App {
     pub comment_buf: String,
     pub search_query: String,
     pub search_matches: Vec<usize>,
-    pub search_idx: usize,
     pub pending_keys: Vec<char>,
     pub comment_selection: Option<(usize, usize)>,
+    pub show_file_list: bool,
 }
 
 impl App {
     pub fn new(files: Vec<DiffFile>) -> Self {
         let flat_lines = build_flat_lines(&files);
+        let file_starts = build_file_starts(&flat_lines);
+        let line_counts = files.iter().map(|f| f.line_counts()).collect();
         Self {
             files,
             flat_lines,
+            file_starts,
+            line_counts,
             cursor: 0,
             scroll_offset: 0,
             mode: Mode::Normal,
@@ -58,9 +63,9 @@ impl App {
             comment_buf: String::new(),
             search_query: String::new(),
             search_matches: Vec::new(),
-            search_idx: 0,
             pending_keys: Vec::new(),
             comment_selection: None,
+            show_file_list: true,
         }
     }
 
@@ -74,60 +79,18 @@ impl App {
             .get(fl.line_idx)
     }
 
-    pub fn get_flat(&self, flat_idx: usize) -> Option<&FlatLine> {
-        self.flat_lines.get(flat_idx)
-    }
-
-    pub fn file_for_line(&self, flat_idx: usize) -> Option<&DiffFile> {
-        let fl = self.flat_lines.get(flat_idx)?;
-        self.files.get(fl.file_idx)
-    }
-
-    pub fn total_lines(&self) -> usize {
-        self.flat_lines.len()
-    }
-
     pub fn active_file_idx(&self) -> Option<usize> {
         self.flat_lines.get(self.cursor).map(|fl| fl.file_idx)
     }
 
-    pub fn file_line_counts(&self) -> Vec<(usize, usize)> {
-        // Returns (additions, deletions) per file
-        self.files
-            .iter()
-            .map(|file| {
-                let mut adds = 0usize;
-                let mut dels = 0usize;
-                for hunk in &file.hunks {
-                    for line in &hunk.lines {
-                        match line.kind {
-                            crate::diff::model::LineType::Addition => adds += 1,
-                            crate::diff::model::LineType::Deletion => dels += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                (adds, dels)
-            })
-            .collect()
-    }
-
     fn clamp_cursor(&mut self) {
-        let max = if self.total_lines() == 0 {
-            0
-        } else {
-            self.total_lines() - 1
-        };
-        self.cursor = self.cursor.min(max);
+        self.cursor = self.cursor.min(self.flat_lines.len().saturating_sub(1));
     }
 
     fn ensure_visible(&mut self, viewport_height: usize) {
         if self.cursor < self.scroll_offset {
             self.scroll_offset = self.cursor;
         } else if self.rendered_rows_between(self.scroll_offset, self.cursor) > viewport_height {
-            // Binary search for the smallest scroll_offset where cursor fits.
-            // rendered_rows_between(offset, cursor) is monotonically non-increasing
-            // as offset grows, so binary search works.
             let mut lo = self.scroll_offset;
             let mut hi = self.cursor;
             while lo < hi {
@@ -142,24 +105,26 @@ impl App {
         }
     }
 
-    fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
+    pub fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
+        if self.flat_lines.is_empty() || from >= self.flat_lines.len() {
+            return 0;
+        }
         let mut rows = 0;
         let mut last_file: Option<usize> = None;
         let mut last_hunk: Option<(usize, usize)> = None;
+        let end = to.min(self.flat_lines.len() - 1);
 
-        for idx in from..=to {
-            if let Some(fl) = self.get_flat(idx) {
-                if last_file != Some(fl.file_idx) {
-                    rows += 1; // file header
-                    last_file = Some(fl.file_idx);
-                    last_hunk = None;
-                }
-                if last_hunk != Some((fl.file_idx, fl.hunk_idx)) && fl.line_idx == 0 {
-                    rows += 1; // hunk header
-                    last_hunk = Some((fl.file_idx, fl.hunk_idx));
-                }
-                rows += 1; // the line itself
+        for fl in &self.flat_lines[from..=end] {
+            if last_file != Some(fl.file_idx) {
+                rows += 1;
+                last_file = Some(fl.file_idx);
+                last_hunk = None;
             }
+            if last_hunk != Some((fl.file_idx, fl.hunk_idx)) && fl.line_idx == 0 {
+                rows += 1;
+                last_hunk = Some((fl.file_idx, fl.hunk_idx));
+            }
+            rows += 1;
         }
         rows
     }
@@ -187,19 +152,10 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        // Reserve 1 line for status bar
         let viewport_height = area.height.saturating_sub(2) as usize;
         self.ensure_visible(viewport_height);
 
-        match self.layout {
-            ViewLayout::SideBySide => {
-                crate::ui::side_by_side::render(frame, area, self);
-            }
-            ViewLayout::Unified => {
-                crate::ui::side_by_side::render(frame, area, self);
-                // TODO: unified renderer
-            }
-        }
+        crate::ui::side_by_side::render(frame, area, self);
     }
 
     fn handle_key(&mut self, key: KeyEvent, viewport_height: usize) {
@@ -208,32 +164,22 @@ impl App {
         match &self.mode {
             Mode::Comment => self.handle_comment_key(key),
             Mode::Command => self.handle_command_key(key),
-            Mode::Normal | Mode::VisualLine { .. } | Mode::VisualBlock { .. } => {
-                self.handle_nav_key(key, content_height);
-            }
+            _ => self.handle_nav_key(key, content_height),
         }
     }
 
     fn handle_nav_key(&mut self, key: KeyEvent, viewport_height: usize) {
         let half_page = viewport_height / 2;
 
-        // Handle 'g' prefix for gg
         if !self.pending_keys.is_empty() {
             if let KeyCode::Char(c) = key.code {
                 let pending = self.pending_keys.clone();
                 self.pending_keys.clear();
-
-                if pending == ['g'] && c == 'g' {
-                    self.cursor = 0;
-                    return;
-                }
-                if pending == [']'] && c == 'c' {
-                    self.jump_next_hunk();
-                    return;
-                }
-                if pending == ['['] && c == 'c' {
-                    self.jump_prev_hunk();
-                    return;
+                match (pending.as_slice(), c) {
+                    (&['g'], 'g') => self.cursor = 0,
+                    (&[']'], 'c') => self.jump_next_hunk(),
+                    (&['['], 'c') => self.jump_prev_hunk(),
+                    _ => {}
                 }
             } else {
                 self.pending_keys.clear();
@@ -244,7 +190,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.cursor < self.total_lines().saturating_sub(1) {
+                if self.cursor < self.flat_lines.len().saturating_sub(1) {
                     self.cursor += 1;
                 }
             }
@@ -252,22 +198,32 @@ impl App {
                 self.cursor = self.cursor.saturating_sub(1);
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.cursor = (self.cursor + half_page).min(self.total_lines().saturating_sub(1));
+                self.cursor =
+                    (self.cursor + half_page).min(self.flat_lines.len().saturating_sub(1));
+                self.center_scroll(viewport_height);
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor = self.cursor.saturating_sub(half_page);
+                self.center_scroll(viewport_height);
             }
             KeyCode::Char('G') => {
-                self.cursor = self.total_lines().saturating_sub(1);
+                self.cursor = self.flat_lines.len().saturating_sub(1);
             }
-            KeyCode::Char('g') => {
-                self.pending_keys.push('g');
+            KeyCode::Char('L') if matches!(self.mode, Mode::Normal) => {
+                self.jump_next_file();
+                self.center_scroll(viewport_height);
             }
-            KeyCode::Char(']') => {
-                self.pending_keys.push(']');
+            KeyCode::Char('H') if matches!(self.mode, Mode::Normal) => {
+                self.jump_prev_file();
+                self.center_scroll(viewport_height);
             }
-            KeyCode::Char('[') => {
-                self.pending_keys.push('[');
+            KeyCode::Char('e') if matches!(self.mode, Mode::Normal) => {
+                self.show_file_list = !self.show_file_list;
+            }
+            KeyCode::Char('g') | KeyCode::Char(']') | KeyCode::Char('[') => {
+                if let KeyCode::Char(c) = key.code {
+                    self.pending_keys.push(c);
+                }
             }
             KeyCode::Char('V') if matches!(self.mode, Mode::Normal) => {
                 self.mode = Mode::VisualLine {
@@ -279,18 +235,18 @@ impl App {
                 self.mode = Mode::Comment;
                 self.comment_buf.clear();
             }
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-            }
+            KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Char('/') if matches!(self.mode, Mode::Normal) => {
                 self.mode = Mode::Command;
                 self.search_query.clear();
             }
             KeyCode::Char('n') if matches!(self.mode, Mode::Normal) => {
                 self.jump_next_search_match();
+                self.center_scroll(viewport_height);
             }
             KeyCode::Char('N') if matches!(self.mode, Mode::Normal) => {
                 self.jump_prev_search_match();
+                self.center_scroll(viewport_height);
             }
             KeyCode::Tab => {
                 self.layout = match self.layout {
@@ -319,9 +275,7 @@ impl App {
             KeyCode::Backspace => {
                 self.comment_buf.pop();
             }
-            KeyCode::Char(c) => {
-                self.comment_buf.push(c);
-            }
+            KeyCode::Char(c) => self.comment_buf.push(c),
             _ => {}
         }
     }
@@ -340,9 +294,7 @@ impl App {
             KeyCode::Backspace => {
                 self.search_query.pop();
             }
-            KeyCode::Char(c) => {
-                self.search_query.push(c);
-            }
+            KeyCode::Char(c) => self.search_query.push(c),
             _ => {}
         }
     }
@@ -357,7 +309,7 @@ impl App {
             None => (self.cursor, self.cursor),
         };
 
-        let start_fl = match self.get_flat(start) {
+        let start_fl = match self.flat_lines.get(start) {
             Some(fl) => *fl,
             None => return,
         };
@@ -366,17 +318,16 @@ impl App {
             None => return,
         };
 
-        // Clamp selection to same file — don't cross file boundaries
         let clamped_end = (start..=end)
             .rev()
             .find(|&i| {
-                self.get_flat(i)
+                self.flat_lines
+                    .get(i)
                     .is_some_and(|fl| fl.file_idx == start_fl.file_idx)
             })
             .unwrap_or(start);
 
         let mut context_lines = Vec::new();
-        // Build a human-readable display range from the selected lines
         let mut old_lines: Vec<u32> = Vec::new();
         let mut new_lines: Vec<u32> = Vec::new();
 
@@ -388,23 +339,15 @@ impl App {
                 if let Some(n) = line.new_lineno {
                     new_lines.push(n);
                 }
-
-                let prefix = match line.kind {
-                    LineType::Addition => "+",
-                    LineType::Deletion => "-",
-                    LineType::Context => " ",
-                };
-                context_lines.push(format!("{}{}", prefix, line.content));
+                context_lines.push(format!("{}{}", line.kind.prefix(), line.content));
             }
         }
-
-        let display_range = build_display_range(&old_lines, &new_lines);
 
         self.annotations.push(Annotation {
             file,
             flat_start: start,
             flat_end: clamped_end,
-            display_range,
+            display_range: build_display_range(&old_lines, &new_lines),
             diff_context: context_lines.join("\n"),
             comment: self.comment_buf.clone(),
         });
@@ -418,56 +361,48 @@ impl App {
             return;
         }
         let query = self.search_query.to_lowercase();
-        for (i, _fl) in self.flat_lines.iter().enumerate() {
+        for (i, _) in self.flat_lines.iter().enumerate() {
             if let Some(line) = self.get_line(i) {
                 if line.content.to_lowercase().contains(&query) {
                     self.search_matches.push(i);
                 }
             }
         }
-        self.search_idx = 0;
     }
 
     fn jump_next_search_match(&mut self) {
         if self.search_matches.is_empty() {
             return;
         }
-        // Find next match after cursor
-        if let Some(pos) = self.search_matches.iter().position(|&m| m > self.cursor) {
-            self.search_idx = pos;
-            self.cursor = self.search_matches[pos];
+        let pos = self
+            .search_matches
+            .partition_point(|&m| m <= self.cursor);
+        let idx = if pos < self.search_matches.len() {
+            pos
         } else {
-            // Wrap around
-            self.search_idx = 0;
-            self.cursor = self.search_matches[0];
-        }
+            0
+        };
+        self.cursor = self.search_matches[idx];
     }
 
     fn jump_prev_search_match(&mut self) {
         if self.search_matches.is_empty() {
             return;
         }
-        if let Some(pos) = self
-            .search_matches
-            .iter()
-            .rposition(|&m| m < self.cursor)
-        {
-            self.search_idx = pos;
-            self.cursor = self.search_matches[pos];
+        let pos = self.search_matches.partition_point(|&m| m < self.cursor);
+        let idx = if pos > 0 {
+            pos - 1
         } else {
-            let last = self.search_matches.len() - 1;
-            self.search_idx = last;
-            self.cursor = self.search_matches[last];
-        }
+            self.search_matches.len() - 1
+        };
+        self.cursor = self.search_matches[idx];
     }
 
     fn jump_next_hunk(&mut self) {
         if let Some(current) = self.flat_lines.get(self.cursor) {
-            let current_file = current.file_idx;
-            let current_hunk = current.hunk_idx;
-
+            let (cf, ch) = (current.file_idx, current.hunk_idx);
             for (i, fl) in self.flat_lines.iter().enumerate().skip(self.cursor + 1) {
-                if fl.file_idx != current_file || fl.hunk_idx != current_hunk {
+                if fl.file_idx != cf || fl.hunk_idx != ch {
                     self.cursor = i;
                     return;
                 }
@@ -479,31 +414,53 @@ impl App {
         if self.cursor == 0 {
             return;
         }
-        if let Some(current) = self.flat_lines.get(self.cursor) {
-            let current_file = current.file_idx;
-            let current_hunk = current.hunk_idx;
+        let Some(current) = self.flat_lines.get(self.cursor) else {
+            return;
+        };
+        let (cf, ch) = (current.file_idx, current.hunk_idx);
 
-            // Go backwards to find start of previous hunk
-            let mut target_file = current_file;
-            let mut target_hunk = current_hunk;
-
-            for (i, fl) in self.flat_lines[..self.cursor].iter().enumerate().rev() {
-                if fl.file_idx != target_file || fl.hunk_idx != target_hunk {
-                    target_file = fl.file_idx;
-                    target_hunk = fl.hunk_idx;
-                    // Now find the start of this hunk
-                    for (j, fl2) in self.flat_lines.iter().enumerate() {
-                        if fl2.file_idx == target_file && fl2.hunk_idx == target_hunk {
-                            self.cursor = j;
-                            return;
-                        }
-                    }
-                    self.cursor = i;
-                    return;
-                }
+        // Walk backwards past the current hunk to find the previous one
+        let mut prev_end = self.cursor - 1;
+        while prev_end > 0 {
+            let fl = &self.flat_lines[prev_end];
+            if fl.file_idx != cf || fl.hunk_idx != ch {
+                break;
             }
-            self.cursor = 0;
+            prev_end -= 1;
         }
+        // Now find the start of that hunk
+        let target = &self.flat_lines[prev_end];
+        let (tf, th) = (target.file_idx, target.hunk_idx);
+        let start = self
+            .flat_lines[..=prev_end]
+            .iter()
+            .rposition(|fl| fl.file_idx != tf || fl.hunk_idx != th)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.cursor = start;
+    }
+
+    fn jump_next_file(&mut self) {
+        // Find the file_starts entry *after* the cursor position
+        let pos = self.file_starts.partition_point(|&s| s <= self.cursor);
+        if pos < self.file_starts.len() {
+            self.cursor = self.file_starts[pos];
+        }
+    }
+
+    fn jump_prev_file(&mut self) {
+        // Find the file_starts entry containing the cursor, then go to the one before it
+        let pos = self.file_starts.partition_point(|&s| s <= self.cursor);
+        if pos >= 2 {
+            self.cursor = self.file_starts[pos - 2];
+        } else if pos == 1 {
+            self.cursor = self.file_starts[0];
+        }
+    }
+
+    fn center_scroll(&mut self, viewport_height: usize) {
+        let half = viewport_height / 2;
+        self.scroll_offset = self.cursor.saturating_sub(half);
     }
 }
 
@@ -534,7 +491,7 @@ fn build_flat_lines(files: &[DiffFile]) -> Vec<FlatLine> {
     let mut flat = Vec::new();
     for (fi, file) in files.iter().enumerate() {
         for (hi, hunk) in file.hunks.iter().enumerate() {
-            for (li, _line) in hunk.lines.iter().enumerate() {
+            for li in 0..hunk.lines.len() {
                 flat.push(FlatLine {
                     file_idx: fi,
                     hunk_idx: hi,
@@ -544,4 +501,16 @@ fn build_flat_lines(files: &[DiffFile]) -> Vec<FlatLine> {
         }
     }
     flat
+}
+
+fn build_file_starts(flat_lines: &[FlatLine]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut last_file = None;
+    for (i, fl) in flat_lines.iter().enumerate() {
+        if last_file != Some(fl.file_idx) {
+            starts.push(i);
+            last_file = Some(fl.file_idx);
+        }
+    }
+    starts
 }

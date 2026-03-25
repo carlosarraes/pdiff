@@ -4,12 +4,9 @@ use crate::diff::model::LineType;
 
 pub struct Theme {
     pub addition: Style,
-    pub addition_bg: Style,
     pub deletion: Style,
-    pub deletion_bg: Style,
     pub context: Style,
     pub line_number: Style,
-    pub line_number_active: Style,
     pub hunk_header: Style,
     pub selection: Style,
     pub comment_indicator: Style,
@@ -27,12 +24,9 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             addition: Style::default().fg(Color::Green).bg(Color::Rgb(0, 35, 0)),
-            addition_bg: Style::default().bg(Color::Rgb(0, 35, 0)),
             deletion: Style::default().fg(Color::Red).bg(Color::Rgb(40, 0, 0)),
-            deletion_bg: Style::default().bg(Color::Rgb(40, 0, 0)),
             context: Style::default().fg(Color::DarkGray),
             line_number: Style::default().fg(Color::DarkGray),
-            line_number_active: Style::default().fg(Color::Yellow),
             hunk_header: Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -75,13 +69,21 @@ impl Theme {
         }
     }
 
+    pub fn lineno_style(&self, kind: &LineType) -> Style {
+        let base = self.line_number;
+        match kind {
+            LineType::Addition => base.bg(self.addition.bg.unwrap_or(Color::Reset)),
+            LineType::Deletion => base.bg(self.deletion.bg.unwrap_or(Color::Reset)),
+            LineType::Context => base,
+        }
+    }
+
     pub fn mode_style(&self, mode: &crate::vim::mode::Mode) -> Style {
         match mode {
-            crate::vim::mode::Mode::Normal => self.mode_normal,
+            crate::vim::mode::Mode::Normal | crate::vim::mode::Mode::Command => self.mode_normal,
             crate::vim::mode::Mode::VisualLine { .. }
             | crate::vim::mode::Mode::VisualBlock { .. } => self.mode_visual,
             crate::vim::mode::Mode::Comment => self.mode_comment,
-            crate::vim::mode::Mode::Command => self.mode_normal,
         }
     }
 }

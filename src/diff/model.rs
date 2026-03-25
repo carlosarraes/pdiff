@@ -5,6 +5,16 @@ pub enum LineType {
     Deletion,
 }
 
+impl LineType {
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            LineType::Addition => "+",
+            LineType::Deletion => "-",
+            LineType::Context => " ",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: LineType,
@@ -16,9 +26,7 @@ pub struct DiffLine {
 #[derive(Debug, Clone)]
 pub struct Hunk {
     pub old_start: u32,
-    pub old_count: u32,
     pub new_start: u32,
-    pub new_count: u32,
     pub header: String,
     pub lines: Vec<DiffLine>,
 }
@@ -31,4 +39,21 @@ pub struct DiffFile {
     pub is_new: bool,
     pub is_deleted: bool,
     pub is_binary: bool,
+}
+
+impl DiffFile {
+    pub fn line_counts(&self) -> (usize, usize) {
+        let mut adds = 0usize;
+        let mut dels = 0usize;
+        for hunk in &self.hunks {
+            for line in &hunk.lines {
+                match line.kind {
+                    LineType::Addition => adds += 1,
+                    LineType::Deletion => dels += 1,
+                    LineType::Context => {}
+                }
+            }
+        }
+        (adds, dels)
+    }
 }
