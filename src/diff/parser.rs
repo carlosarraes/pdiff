@@ -34,7 +34,6 @@ fn parse_file(lines: &[&str]) -> (Option<DiffFile>, usize) {
     let mut actual_old_path = old_path.clone();
     let mut actual_new_path = new_path.clone();
 
-    // Parse extended headers (old mode, new mode, rename, etc.)
     while i < lines.len() {
         let line = lines[i];
         if line.starts_with("---") || line.starts_with("@@") || line.starts_with("diff --git ") {
@@ -86,7 +85,6 @@ fn parse_file(lines: &[&str]) -> (Option<DiffFile>, usize) {
         i += 1;
     }
 
-    // Parse hunks
     let mut hunks = Vec::new();
     while i < lines.len() && !lines[i].starts_with("diff --git ") {
         if lines[i].starts_with("@@ ") {
@@ -181,7 +179,6 @@ fn parse_hunk(lines: &[&str]) -> (Hunk, usize) {
 }
 
 fn parse_hunk_header(header: &str) -> (u32, u32, u32, u32) {
-    // @@ -old_start,old_count +new_start,new_count @@ optional context
     let header = header.trim_start_matches("@@ ");
     let parts: Vec<&str> = header.splitn(3, ' ').collect();
 
@@ -234,7 +231,7 @@ fn unquote_git_path(s: &str) -> String {
                     let mut val: u8 = 0;
                     for _ in 0..3 {
                         if let Some(&d) = chars.peek() {
-                            if d >= '0' && d <= '7' {
+                            if ('0'..='7').contains(&d) {
                                 val = val * 8 + (d as u8 - b'0');
                                 chars.next();
                             } else {

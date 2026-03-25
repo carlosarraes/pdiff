@@ -47,6 +47,7 @@ impl App {
         let flat_lines = build_flat_lines(&files);
         let file_starts = build_file_starts(&flat_lines);
         let line_counts = files.iter().map(|f| f.line_counts()).collect();
+        let highlighter = Highlighter::new(&files);
         Self {
             files,
             flat_lines,
@@ -58,7 +59,7 @@ impl App {
             annotations: Vec::new(),
             layout: ViewLayout::SideBySide,
             theme: Theme::default(),
-            highlighter: Highlighter::new(),
+            highlighter,
             should_quit: false,
             comment_buf: String::new(),
             search_query: String::new(),
@@ -105,7 +106,7 @@ impl App {
         }
     }
 
-    pub fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
+    fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
         if self.flat_lines.is_empty() || from >= self.flat_lines.len() {
             return 0;
         }
@@ -173,12 +174,12 @@ impl App {
 
         if !self.pending_keys.is_empty() {
             if let KeyCode::Char(c) = key.code {
-                let pending = self.pending_keys.clone();
+                let first = self.pending_keys[0];
                 self.pending_keys.clear();
-                match (pending.as_slice(), c) {
-                    (&['g'], 'g') => self.cursor = 0,
-                    (&[']'], 'c') => self.jump_next_hunk(),
-                    (&['['], 'c') => self.jump_prev_hunk(),
+                match (first, c) {
+                    ('g', 'g') => self.cursor = 0,
+                    (']', 'c') => self.jump_next_hunk(),
+                    ('[', 'c') => self.jump_prev_hunk(),
                     _ => {}
                 }
             } else {
@@ -361,9 +362,13 @@ impl App {
             return;
         }
         let query = self.search_query.to_lowercase();
-        for (i, _) in self.flat_lines.iter().enumerate() {
-            if let Some(line) = self.get_line(i) {
-                if line.content.to_lowercase().contains(&query) {
+        for (i, fl) in self.flat_lines.iter().enumerate() {
+            if let Some(content) = self.files.get(fl.file_idx)
+                .and_then(|f| f.hunks.get(fl.hunk_idx))
+                .and_then(|h| h.lines.get(fl.line_idx))
+                .map(|l| &l.content)
+            {
+                if content.to_lowercase().contains(&query) {
                     self.search_matches.push(i);
                 }
             }
@@ -419,7 +424,6 @@ impl App {
         };
         let (cf, ch) = (current.file_idx, current.hunk_idx);
 
-        // Walk backwards past the current hunk to find the previous one
         let mut prev_end = self.cursor - 1;
         while prev_end > 0 {
             let fl = &self.flat_lines[prev_end];
@@ -428,7 +432,6 @@ impl App {
             }
             prev_end -= 1;
         }
-        // Now find the start of that hunk
         let target = &self.flat_lines[prev_end];
         let (tf, th) = (target.file_idx, target.hunk_idx);
         let start = self
@@ -441,7 +444,6 @@ impl App {
     }
 
     fn jump_next_file(&mut self) {
-        // Find the file_starts entry *after* the cursor position
         let pos = self.file_starts.partition_point(|&s| s <= self.cursor);
         if pos < self.file_starts.len() {
             self.cursor = self.file_starts[pos];
@@ -449,7 +451,6 @@ impl App {
     }
 
     fn jump_prev_file(&mut self) {
-        // Find the file_starts entry containing the cursor, then go to the one before it
         let pos = self.file_starts.partition_point(|&s| s <= self.cursor);
         if pos >= 2 {
             self.cursor = self.file_starts[pos - 2];

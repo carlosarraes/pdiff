@@ -86,21 +86,17 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    {
-        // Standalone: prompt via /dev/tty (stdin may be a pipe)
-        match prompt_save_tty(annotations.len()) {
-            Ok(true) => {
-                output::write_markdown(&annotations, &PathBuf::from("pdiff-review.md"))?;
-                eprintln!("Saved to pdiff-review.md.");
-            }
-            Ok(false) => {
-                eprintln!("\n{}", output::format_markdown(&annotations));
-            }
-            Err(_) => {
-                // Can't open /dev/tty (e.g. non-interactive env) — auto-save
-                output::write_markdown(&annotations, &PathBuf::from("pdiff-review.md"))?;
-                eprintln!("Wrote {} comment(s) to pdiff-review.md", annotations.len());
-            }
+    match prompt_save_tty(annotations.len()) {
+        Ok(true) => {
+            output::write_markdown(&annotations, &PathBuf::from("pdiff-review.md"))?;
+            eprintln!("Saved to pdiff-review.md.");
+        }
+        Ok(false) => {
+            eprintln!("\n{}", output::format_markdown(&annotations));
+        }
+        Err(_) => {
+            output::write_markdown(&annotations, &PathBuf::from("pdiff-review.md"))?;
+            eprintln!("Wrote {} comment(s) to pdiff-review.md", annotations.len());
         }
     }
 

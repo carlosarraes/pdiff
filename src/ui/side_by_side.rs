@@ -188,10 +188,11 @@ fn render_diff_panels(
             ("  ", Style::default())
         };
 
-        let file_path = &app.files[fl.file_idx].path;
         let content_spans = build_content_spans(
             &diff_line.content,
-            file_path,
+            fl.file_idx,
+            fl.hunk_idx,
+            fl.line_idx,
             line_style,
             is_cursor,
             is_selected,
@@ -334,7 +335,9 @@ fn render_command_line(frame: &mut Frame, area: Rect, app: &App) {
 
 fn build_content_spans(
     content: &str,
-    file_path: &str,
+    file_idx: usize,
+    hunk_idx: usize,
+    line_idx: usize,
     line_style: Style,
     is_cursor: bool,
     is_selected: bool,
@@ -349,7 +352,7 @@ fn build_content_spans(
     } else if is_selected {
         vec![Span::styled(content.to_string(), theme.selection)]
     } else {
-        let hl_spans = highlighter.highlight_line(content, file_path);
+        let hl_spans = highlighter.get_spans(file_idx, hunk_idx, line_idx);
         if hl_spans.is_empty() {
             vec![Span::styled(content.to_string(), line_style)]
         } else {
