@@ -121,6 +121,8 @@ impl App {
     }
 
     pub fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
+        use crate::diff::model::LineType;
+
         if self.flat_lines.is_empty() || from >= self.flat_lines.len() {
             return 0;
         }
@@ -128,9 +130,22 @@ impl App {
         let mut last_file: Option<usize> = None;
         let mut last_hunk: Option<(usize, usize)> = None;
         let end = to.min(self.flat_lines.len() - 1);
+        let is_left = self.focus_side == Side::Left;
 
         for (i, fl) in self.flat_lines[from..=end].iter().enumerate() {
             let flat_idx = from + i;
+
+            // In focus mode, skip lines hidden by the renderer
+            if self.focus_mode {
+                if let Some(line) = self.get_line(flat_idx) {
+                    let hidden = (is_left && line.kind == LineType::Addition)
+                        || (!is_left && line.kind == LineType::Deletion);
+                    if hidden {
+                        continue;
+                    }
+                }
+            }
+
             if last_file != Some(fl.file_idx) {
                 rows += 1;
                 last_file = Some(fl.file_idx);
@@ -142,8 +157,6 @@ impl App {
             }
             rows += 1;
 
-            // Count expanded comment rows (only for lines before the target,
-            // since comments render after their line)
             if self.show_comments && flat_idx < to {
                 if let Some(ann) = self.annotations.iter().find(|a| flat_idx >= a.flat_start && flat_idx <= a.flat_end) {
                     if flat_idx == ann.flat_end {
@@ -221,8 +234,14 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.cursor = self.cursor.saturating_sub(1);
             }
-            KeyCode::Char('h') => self.focus_side = Side::Left,
-            KeyCode::Char('l') => self.focus_side = Side::Right,
+            KeyCode::Char('h') => {
+                self.focus_side = Side::Left;
+                self.snap_cursor_to_visible_line();
+            }
+            KeyCode::Char('l') => {
+                self.focus_side = Side::Right;
+                self.snap_cursor_to_visible_line();
+            }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor =
                     (self.cursor + half_page).min(self.flat_lines.len().saturating_sub(1));
