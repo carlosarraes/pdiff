@@ -42,7 +42,7 @@ export default function (apiRef: ExtensionAPI) {
 
 async function showTargetSelector(ctx: ExtensionContext): Promise<ReviewTarget | null> {
 	const items: SelectItem[] = [
-		{ value: "uncommitted", label: "Uncommitted changes", description: "all changes vs HEAD" },
+		{ value: "staged", label: "Staged changes", description: "review what's staged (git add first)" },
 		{ value: "baseBranch", label: "Against base branch", description: "diff against another branch" },
 		{ value: "commit", label: "Specific commit", description: "review a single commit" },
 	];
@@ -74,7 +74,7 @@ async function showTargetSelector(ctx: ExtensionContext): Promise<ReviewTarget |
 	if (!result) return null;
 
 	switch (result) {
-		case "uncommitted":
+		case "staged":
 			return { type: "uncommitted" };
 
 		case "baseBranch": {
@@ -117,23 +117,12 @@ async function getDiff(target: ReviewTarget, ctx: ExtensionContext): Promise<str
 
 	switch (target.type) {
 		case "uncommitted": {
-			const { stdout: untracked } = await pi.exec("git", ["ls-files", "--others", "--exclude-standard"]);
-			if (untracked?.trim()) {
-				ctx.ui.notify("Untracked files skipped. Run 'git add' to include them.", "warning");
+			const { stdout: diff } = await pi.exec("git", ["diff", "--cached"]);
+			if (!diff?.trim()) {
+				ctx.ui.notify("No staged changes. Run 'git add' first.", "warning");
+				return null;
 			}
-
-			const { code: headCheck } = await pi.exec("git", ["rev-parse", "--verify", "HEAD"]);
-			if (headCheck === 0) {
-				args = ["diff", "HEAD"];
-			} else {
-				const { stdout: diff } = await pi.exec("git", ["diff", "--cached"]);
-				if (!diff?.trim()) {
-					ctx.ui.notify("No staged changes. Run 'git add' first.", "warning");
-					return null;
-				}
-				return diff;
-			}
-			break;
+			return diff;
 		}
 		case "baseBranch":
 			// Compare committed state only, not working tree

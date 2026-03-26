@@ -21,6 +21,12 @@ pub enum ViewLayout {
     Unified,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
 pub struct App {
     pub files: Vec<DiffFile>,
     pub flat_lines: Vec<FlatLine>,
@@ -29,6 +35,7 @@ pub struct App {
     pub cursor: usize,
     pub scroll_offset: usize,
     pub mode: Mode,
+    pub focus_side: Side,
     pub annotations: Vec<Annotation>,
     pub layout: ViewLayout,
     pub theme: Theme,
@@ -39,7 +46,10 @@ pub struct App {
     pub search_matches: Vec<usize>,
     pub pending_keys: Vec<char>,
     pub comment_selection: Option<(usize, usize)>,
+    pub editing_annotation: Option<usize>,
     pub show_file_list: bool,
+    pub show_comments: bool,
+    pub focus_mode: bool,
 }
 
 impl App {
@@ -56,6 +66,7 @@ impl App {
             cursor: 0,
             scroll_offset: 0,
             mode: Mode::Normal,
+            focus_side: Side::Right,
             annotations: Vec::new(),
             layout: ViewLayout::SideBySide,
             theme: Theme::default(),
@@ -66,7 +77,10 @@ impl App {
             search_matches: Vec::new(),
             pending_keys: Vec::new(),
             comment_selection: None,
+            editing_annotation: None,
             show_file_list: true,
+            show_comments: false,
+            focus_mode: false,
         }
     }
 
@@ -106,7 +120,7 @@ impl App {
         }
     }
 
-    fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
+    pub fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
         if self.flat_lines.is_empty() || from >= self.flat_lines.len() {
             return 0;
         }
@@ -163,7 +177,8 @@ impl App {
         let content_height = viewport_height.saturating_sub(2);
 
         match &self.mode {
-            Mode::Comment => self.handle_comment_key(key),
+            Mode::CommentInsert => self.handle_comment_insert_key(key),
+            Mode::CommentNormal => self.handle_comment_normal_key(key),
             Mode::Command => self.handle_command_key(key),
             _ => self.handle_nav_key(key, content_height),
         }
@@ -176,11 +191,8 @@ impl App {
             if let KeyCode::Char(c) = key.code {
                 let first = self.pending_keys[0];
                 self.pending_keys.clear();
-                match (first, c) {
-                    ('g', 'g') => self.cursor = 0,
-                    (']', 'c') => self.jump_next_hunk(),
-                    ('[', 'c') => self.jump_prev_hunk(),
-                    _ => {}
+                if first == 'g' && c == 'g' {
+                    self.cursor = 0;
                 }
             } else {
                 self.pending_keys.clear();
@@ -198,6 +210,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.cursor = self.cursor.saturating_sub(1);
             }
+            KeyCode::Char('h') => self.focus_side = Side::Left,
+            KeyCode::Char('l') => self.focus_side = Side::Right,
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor =
                     (self.cursor + half_page).min(self.flat_lines.len().saturating_sub(1));
@@ -221,20 +235,43 @@ impl App {
             KeyCode::Char('e') if matches!(self.mode, Mode::Normal) => {
                 self.show_file_list = !self.show_file_list;
             }
-            KeyCode::Char('g') | KeyCode::Char(']') | KeyCode::Char('[') => {
-                if let KeyCode::Char(c) = key.code {
-                    self.pending_keys.push(c);
-                }
+            KeyCode::Char('F') if matches!(self.mode, Mode::Normal) => {
+                self.focus_mode = !self.focus_mode;
             }
+            KeyCode::Char('g') => {
+                self.pending_keys.push('g');
+            }
+            KeyCode::Char(']') => self.jump_next_hunk(),
+            KeyCode::Char('[') => self.jump_prev_hunk(),
             KeyCode::Char('V') if matches!(self.mode, Mode::Normal) => {
                 self.mode = Mode::VisualLine {
                     anchor: self.cursor,
                 };
             }
-            KeyCode::Char('c') if matches!(self.mode, Mode::VisualLine { .. }) => {
-                self.comment_selection = self.selection_range();
-                self.mode = Mode::Comment;
-                self.comment_buf.clear();
+            KeyCode::Char('c')
+                if matches!(self.mode, Mode::Normal | Mode::VisualLine { .. }) =>
+            {
+                let range = if matches!(self.mode, Mode::VisualLine { .. }) {
+                    self.selection_range().unwrap_or((self.cursor, self.cursor))
+                } else {
+                    (self.cursor, self.cursor)
+                };
+
+                // Check if an existing annotation covers this range
+                if let Some(idx) = self.find_annotation_at(range.0) {
+                    self.comment_buf = self.annotations[idx].comment.clone();
+                    self.comment_selection =
+                        Some((self.annotations[idx].flat_start, self.annotations[idx].flat_end));
+                    self.editing_annotation = Some(idx);
+                } else {
+                    self.comment_buf.clear();
+                    self.comment_selection = Some(range);
+                    self.editing_annotation = None;
+                }
+                self.mode = Mode::CommentInsert;
+            }
+            KeyCode::Char('E') if matches!(self.mode, Mode::Normal) => {
+                self.show_comments = !self.show_comments;
             }
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Char('/') if matches!(self.mode, Mode::Normal) => {
@@ -260,11 +297,14 @@ impl App {
         self.clamp_cursor();
     }
 
-    fn handle_comment_key(&mut self, key: KeyEvent) {
+    fn handle_comment_insert_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.comment_buf.clear();
-                self.mode = Mode::Normal;
+                if self.comment_buf.is_empty() {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.mode = Mode::CommentNormal;
+                }
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.comment_buf.push('\n');
@@ -277,6 +317,23 @@ impl App {
                 self.comment_buf.pop();
             }
             KeyCode::Char(c) => self.comment_buf.push(c),
+            _ => {}
+        }
+    }
+
+    fn handle_comment_normal_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.comment_buf.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('a') | KeyCode::Char('i') => {
+                self.mode = Mode::CommentInsert;
+            }
+            KeyCode::Enter | KeyCode::Char('c') => {
+                self.submit_comment();
+                self.mode = Mode::Normal;
+            }
             _ => {}
         }
     }
@@ -300,9 +357,31 @@ impl App {
         }
     }
 
+    fn find_annotation_at(&self, flat_idx: usize) -> Option<usize> {
+        self.annotations
+            .iter()
+            .position(|a| flat_idx >= a.flat_start && flat_idx <= a.flat_end)
+    }
+
     fn submit_comment(&mut self) {
         if self.comment_buf.trim().is_empty() {
+            // If editing and user cleared the comment, delete the annotation
+            if let Some(idx) = self.editing_annotation.take() {
+                if idx < self.annotations.len() {
+                    self.annotations.remove(idx);
+                }
+            }
+            self.comment_buf.clear();
             return;
+        }
+
+        // If editing an existing annotation, update in place
+        if let Some(idx) = self.editing_annotation.take() {
+            if idx < self.annotations.len() {
+                self.annotations[idx].comment = self.comment_buf.clone();
+                self.comment_buf.clear();
+                return;
+            }
         }
 
         let (start, end) = match self.comment_selection.take() {
@@ -363,7 +442,9 @@ impl App {
         }
         let query = self.search_query.to_lowercase();
         for (i, fl) in self.flat_lines.iter().enumerate() {
-            if let Some(content) = self.files.get(fl.file_idx)
+            if let Some(content) = self
+                .files
+                .get(fl.file_idx)
                 .and_then(|f| f.hunks.get(fl.hunk_idx))
                 .and_then(|h| h.lines.get(fl.line_idx))
                 .map(|l| &l.content)
@@ -434,8 +515,7 @@ impl App {
         }
         let target = &self.flat_lines[prev_end];
         let (tf, th) = (target.file_idx, target.hunk_idx);
-        let start = self
-            .flat_lines[..=prev_end]
+        let start = self.flat_lines[..=prev_end]
             .iter()
             .rposition(|fl| fl.file_idx != tf || fl.hunk_idx != th)
             .map(|i| i + 1)

@@ -3,7 +3,8 @@ pub enum Mode {
     Normal,
     VisualLine { anchor: usize },
     VisualBlock { anchor: (usize, usize) },
-    Comment,
+    CommentInsert,
+    CommentNormal,
     Command,
 }
 
@@ -13,8 +14,13 @@ impl Mode {
             Mode::Normal => "NORMAL",
             Mode::VisualLine { .. } => "V-LINE",
             Mode::VisualBlock { .. } => "V-BLOCK",
-            Mode::Comment => "COMMENT",
+            Mode::CommentInsert => "COMMENT",
+            Mode::CommentNormal => "COMMENT",
             Mode::Command => "COMMAND",
         }
+    }
+
+    pub fn is_comment(&self) -> bool {
+        matches!(self, Mode::CommentInsert | Mode::CommentNormal)
     }
 }
