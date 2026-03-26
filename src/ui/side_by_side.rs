@@ -300,7 +300,10 @@ fn render_split_panels(
                         Span::styled("     ", Style::default()),
                         Span::styled(format!("# {}", cl), app.theme.comment_indicator),
                     ]);
-                    if app.focus_side == Side::Left {
+                    // Show comment on the side matching the line type
+                    let on_left = diff_line.kind == LineType::Deletion
+                        || (diff_line.kind == LineType::Context && app.focus_side == Side::Left);
+                    if on_left {
                         left_lines.push(comment_span);
                         right_lines.push(Line::default());
                     } else {

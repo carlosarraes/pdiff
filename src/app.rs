@@ -142,8 +142,9 @@ impl App {
             }
             rows += 1;
 
-            // Count expanded comment rows
-            if self.show_comments {
+            // Count expanded comment rows (only for lines before the target,
+            // since comments render after their line)
+            if self.show_comments && flat_idx < to {
                 if let Some(ann) = self.annotations.iter().find(|a| flat_idx >= a.flat_start && flat_idx <= a.flat_end) {
                     if flat_idx == ann.flat_end {
                         rows += ann.comment.lines().count();
