@@ -273,8 +273,7 @@ impl App {
 
                 // Check if an existing annotation covers this range
                 // Only edit if the selection exactly matches an existing annotation
-                let existing = self.find_annotation_at(range.0).filter(|&idx| {
-                    let ann = &self.annotations[idx];
+                let existing = self.annotations.iter().position(|ann| {
                     ann.flat_start == range.0 && ann.flat_end == range.1
                 });
                 if let Some(idx) = existing {
@@ -374,12 +373,6 @@ impl App {
             KeyCode::Char(c) => self.search_query.push(c),
             _ => {}
         }
-    }
-
-    fn find_annotation_at(&self, flat_idx: usize) -> Option<usize> {
-        self.annotations
-            .iter()
-            .position(|a| flat_idx >= a.flat_start && flat_idx <= a.flat_end)
     }
 
     fn submit_comment(&mut self) {
