@@ -269,7 +269,12 @@ impl App {
                 };
 
                 // Check if an existing annotation covers this range
-                if let Some(idx) = self.find_annotation_at(range.0) {
+                // Only edit if the selection exactly matches an existing annotation
+                let existing = self.find_annotation_at(range.0).filter(|&idx| {
+                    let ann = &self.annotations[idx];
+                    ann.flat_start == range.0 && ann.flat_end == range.1
+                });
+                if let Some(idx) = existing {
                     self.comment_buf = self.annotations[idx].comment.clone();
                     self.comment_selection =
                         Some((self.annotations[idx].flat_start, self.annotations[idx].flat_end));

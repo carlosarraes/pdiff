@@ -157,8 +157,6 @@ fn build_diff_lines<'a>(app: &'a App, viewport_height: usize) -> Vec<Line<'a>> {
             || (!is_left && diff_line.kind == LineType::Deletion);
 
         if wrong_side {
-            lines.push(Line::default());
-            rows += 1;
             flat_idx += 1;
             continue;
         }
