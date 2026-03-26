@@ -152,6 +152,17 @@ fn build_diff_lines<'a>(app: &'a App, viewport_height: usize) -> Vec<Line<'a>> {
 
         if rows >= viewport_height { break; }
 
+        // In focus mode, skip lines that don't belong to the focused side
+        let wrong_side = (is_left && diff_line.kind == LineType::Addition)
+            || (!is_left && diff_line.kind == LineType::Deletion);
+
+        if wrong_side {
+            lines.push(Line::default());
+            rows += 1;
+            flat_idx += 1;
+            continue;
+        }
+
         let line_style = app.theme.line_style(&diff_line.kind);
         let lineno_style = app.theme.lineno_style(&diff_line.kind);
         let lineno = if is_left { diff_line.old_lineno } else { diff_line.new_lineno };

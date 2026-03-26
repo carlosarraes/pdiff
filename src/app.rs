@@ -129,7 +129,8 @@ impl App {
         let mut last_hunk: Option<(usize, usize)> = None;
         let end = to.min(self.flat_lines.len() - 1);
 
-        for fl in &self.flat_lines[from..=end] {
+        for (i, fl) in self.flat_lines[from..=end].iter().enumerate() {
+            let flat_idx = from + i;
             if last_file != Some(fl.file_idx) {
                 rows += 1;
                 last_file = Some(fl.file_idx);
@@ -140,6 +141,15 @@ impl App {
                 last_hunk = Some((fl.file_idx, fl.hunk_idx));
             }
             rows += 1;
+
+            // Count expanded comment rows
+            if self.show_comments {
+                if let Some(ann) = self.annotations.iter().find(|a| flat_idx >= a.flat_start && flat_idx <= a.flat_end) {
+                    if flat_idx == ann.flat_end {
+                        rows += ann.comment.lines().count();
+                    }
+                }
+            }
         }
         rows
     }
