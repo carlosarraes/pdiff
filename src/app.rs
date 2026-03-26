@@ -248,6 +248,9 @@ impl App {
             }
             KeyCode::Char('F') if matches!(self.mode, Mode::Normal) => {
                 self.focus_mode = !self.focus_mode;
+                if self.focus_mode {
+                    self.snap_cursor_to_visible_line();
+                }
             }
             KeyCode::Char('g') => {
                 self.pending_keys.push('g');
@@ -552,6 +555,32 @@ impl App {
             self.cursor = self.file_starts[pos - 2];
         } else if pos == 1 {
             self.cursor = self.file_starts[0];
+        }
+    }
+
+    fn snap_cursor_to_visible_line(&mut self) {
+        use crate::diff::model::LineType;
+        let is_left = self.focus_side == Side::Left;
+
+        if let Some(line) = self.get_line(self.cursor) {
+            let hidden = (is_left && line.kind == LineType::Addition)
+                || (!is_left && line.kind == LineType::Deletion);
+            if hidden {
+                // Search forward first, then backward
+                let forward = (self.cursor + 1..self.flat_lines.len()).find(|&i| {
+                    self.get_line(i).is_some_and(|l| {
+                        !((is_left && l.kind == LineType::Addition)
+                            || (!is_left && l.kind == LineType::Deletion))
+                    })
+                });
+                let backward = (0..self.cursor).rev().find(|&i| {
+                    self.get_line(i).is_some_and(|l| {
+                        !((is_left && l.kind == LineType::Addition)
+                            || (!is_left && l.kind == LineType::Deletion))
+                    })
+                });
+                self.cursor = forward.or(backward).unwrap_or(self.cursor);
+            }
         }
     }
 

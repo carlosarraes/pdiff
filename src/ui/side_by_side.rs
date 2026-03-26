@@ -396,20 +396,27 @@ fn render_comment_popup(frame: &mut Frame, diff_area: Rect, app: &App) {
         .min(diff_area.height as usize);
 
     let popup_width = (diff_area.width as f32 * 0.5).max(30.0).min(60.0) as u16;
-    let popup_height = 5u16;
+    let popup_height = 5u16.min(diff_area.height);
+
+    if popup_height == 0 || diff_area.width < 10 {
+        return;
+    }
 
     let popup_y = if cursor_screen_row as u16 + popup_height + 2 < diff_area.height {
         diff_area.y + cursor_screen_row as u16 + 1
     } else {
-        diff_area.y.saturating_add(cursor_screen_row as u16).saturating_sub(popup_height + 1)
+        diff_area
+            .y
+            .saturating_add(cursor_screen_row as u16)
+            .saturating_sub(popup_height + 1)
     };
 
     let popup_x = diff_area.x + (diff_area.width.saturating_sub(popup_width)) / 2;
     let popup_rect = Rect::new(
         popup_x,
-        popup_y.min(diff_area.y + diff_area.height - popup_height),
+        popup_y.min(diff_area.y + diff_area.height.saturating_sub(popup_height)),
         popup_width.min(diff_area.width),
-        popup_height.min(diff_area.height),
+        popup_height,
     );
 
     let (mode_label, cursor_char, hint) = match &app.mode {
