@@ -1,5 +1,6 @@
 mod annotations;
 mod app;
+mod clipboard;
 mod diff;
 mod pi_extension;
 mod ui;
