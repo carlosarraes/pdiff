@@ -8,6 +8,20 @@ use crate::app::{App, Side};
 use crate::diff::model::LineType;
 use crate::vim::mode::Mode;
 
+// Purely visual separator rendered between files (not before the first file).
+// Does not occupy a `flat_lines` entry, so the cursor cannot land on it.
+//
+// TODO (design choice): customize the look of the separator below.
+// Available theme styles on `app.theme`:
+//   - border        (DarkGray)
+//   - file_header   (White + Bold)
+//   - hunk_header   (Cyan + Bold)
+// Ideas: `"─".repeat(N)`, a centered "── file N ──" banner, or a blank line.
+// Returns exactly ONE rendered row (row counting in scroll math assumes this).
+fn file_separator_line<'a>(_app: &'a App) -> Line<'a> {
+    Line::from(Span::styled("─".repeat(120), Style::default().fg(Color::DarkGray)))
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Clear, area);
 
@@ -24,6 +38,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if app.mode.is_comment() {
         render_comment_popup(frame, chunks[0], app);
+    }
+
+    if matches!(app.mode, Mode::TmuxPanePick) {
+        render_tmux_pane_picker(frame, chunks[0], app);
     }
 }
 
@@ -130,6 +148,11 @@ fn build_diff_lines<'a>(app: &'a App, viewport_height: usize) -> Vec<Line<'a>> {
         let is_selected = selection.is_some_and(|(s, e)| flat_idx >= s && flat_idx <= e);
 
         if last_file != Some(fl.file_idx) {
+            if last_file.is_some() {
+                if rows >= viewport_height { break; }
+                lines.push(file_separator_line(app));
+                rows += 1;
+            }
             if rows >= viewport_height { break; }
             let file = &app.files[fl.file_idx];
             let header = match &file.old_path {
@@ -153,10 +176,7 @@ fn build_diff_lines<'a>(app: &'a App, viewport_height: usize) -> Vec<Line<'a>> {
         if rows >= viewport_height { break; }
 
         // In focus mode, skip lines that don't belong to the focused side
-        let wrong_side = (is_left && diff_line.kind == LineType::Addition)
-            || (!is_left && diff_line.kind == LineType::Deletion);
-
-        if wrong_side {
+        if app.line_hidden_on_side(diff_line) {
             flat_idx += 1;
             continue;
         }
@@ -233,6 +253,12 @@ fn render_split_panels(
         let is_selected = selection.is_some_and(|(s, e)| flat_idx >= s && flat_idx <= e);
 
         if last_file != Some(fl.file_idx) {
+            if last_file.is_some() {
+                if rows >= viewport_height { break; }
+                left_lines.push(file_separator_line(app));
+                right_lines.push(file_separator_line(app));
+                rows += 1;
+            }
             if rows >= viewport_height { break; }
             let file = &app.files[fl.file_idx];
             let header = match &file.old_path {
@@ -390,13 +416,85 @@ fn truncate_line(line: Line<'_>, max_width: u16) -> Line<'_> {
     Line::from(new_spans)
 }
 
+fn render_tmux_pane_picker(frame: &mut Frame, diff_area: Rect, app: &App) {
+    let popup_width = (diff_area.width as f32 * 0.6).max(40.0).min(100.0) as u16;
+    let list_rows = app.tmux_panes.len() as u16;
+    let desired_height = list_rows.saturating_add(3); // border + hint + padding
+    let popup_height = desired_height.min(diff_area.height).max(5);
+
+    if popup_height == 0 || diff_area.width < 10 {
+        return;
+    }
+
+    let popup_x = diff_area.x + (diff_area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = diff_area.y + (diff_area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect::new(
+        popup_x,
+        popup_y,
+        popup_width.min(diff_area.width),
+        popup_height,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Span::styled(
+            " TMUX ",
+            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(popup_rect);
+    let inner_width = inner.width as usize;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(app.tmux_panes.len() + 1);
+    for (i, pane) in app.tmux_panes.iter().enumerate() {
+        let selected = i == app.tmux_cursor;
+        let prefix = if selected { "▶ " } else { "  " };
+        let row = format!("{}{}", prefix, pane.label);
+        let truncated: String = row.chars().take(inner_width).collect();
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(truncated, style)));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "j/k:move  Enter:send  Esc:cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let content = Paragraph::new(lines);
+
+    frame.render_widget(Clear, popup_rect);
+    frame.render_widget(block, popup_rect);
+    frame.render_widget(content, inner);
+}
+
 fn render_comment_popup(frame: &mut Frame, diff_area: Rect, app: &App) {
     let cursor_screen_row = app
         .rendered_rows_between(app.scroll_offset, app.cursor)
         .min(diff_area.height as usize);
 
     let popup_width = (diff_area.width as f32 * 0.5).max(30.0).min(60.0) as u16;
-    let popup_height = 5u16.min(diff_area.height);
+    let inner_width = popup_width.saturating_sub(2) as usize;
+
+    // Count rendered rows given hard newlines AND soft wrap.
+    let text_rows = if inner_width == 0 {
+        1
+    } else {
+        app.comment_buf
+            .split('\n')
+            .map(|line| line.chars().count().div_ceil(inner_width).max(1))
+            .sum::<usize>()
+            .max(1)
+    };
+
+    // Layout inside the bordered block: text + blank separator + hint line.
+    // Add 2 for top/bottom borders. Min 5 so the hint is always visible.
+    let desired_height = (text_rows as u16 + 4).max(5);
+    let popup_height = desired_height.min(diff_area.height);
 
     if popup_height == 0 || diff_area.width < 10 {
         return;
@@ -420,7 +518,7 @@ fn render_comment_popup(frame: &mut Frame, diff_area: Rect, app: &App) {
     );
 
     let (mode_label, cursor_char, hint) = match &app.mode {
-        Mode::CommentInsert => (" INSERT ", "█", "Enter:submit  Esc:normal"),
+        Mode::CommentInsert => (" INSERT ", "█", "Enter:submit  ^T:send+save to tmux  Esc:normal"),
         Mode::CommentNormal => (" NORMAL ", "▋", "a/i:insert  Enter/c:submit  Esc:cancel"),
         _ => ("", "", ""),
     };
@@ -431,15 +529,25 @@ fn render_comment_popup(frame: &mut Frame, diff_area: Rect, app: &App) {
         .title(Span::styled(mode_label, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)));
 
     let inner = block.inner(popup_rect);
-    let content = Paragraph::new(vec![
-        Line::from(vec![
-            Span::raw(&app.comment_buf),
-            Span::styled(cursor_char, Style::default().fg(Color::Yellow)),
-        ]),
-        Line::default(),
-        Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-    ])
-    .wrap(Wrap { trim: false });
+
+    // Split buf on '\n' so Line widgets wrap cleanly; cursor glyph on the last.
+    let parts: Vec<&str> = if app.comment_buf.is_empty() {
+        vec![""]
+    } else {
+        app.comment_buf.split('\n').collect()
+    };
+    let mut content_lines: Vec<Line> = Vec::with_capacity(parts.len() + 2);
+    for (i, part) in parts.iter().enumerate() {
+        let mut spans = vec![Span::raw(part.to_string())];
+        if i + 1 == parts.len() {
+            spans.push(Span::styled(cursor_char, Style::default().fg(Color::Yellow)));
+        }
+        content_lines.push(Line::from(spans));
+    }
+    content_lines.push(Line::default());
+    content_lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
+
+    let content = Paragraph::new(content_lines).wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, popup_rect);
     frame.render_widget(block, popup_rect);
@@ -491,12 +599,15 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         String::new()
     };
 
+    let toast = app.toast.as_deref().map(|t| format!(" {} ", t)).unwrap_or_default();
+
     let bar = Line::from(vec![
         Span::styled(format!(" {} ", app.mode.label()), mode_style),
         Span::styled(format!(" {} ", side_label), Style::default().fg(Color::Cyan)),
         Span::styled(format!(" {} ", file_info), app.theme.status_bar),
         Span::styled(annotations_count, app.theme.comment_indicator),
         Span::styled(search_info, app.theme.status_bar),
+        Span::styled(toast, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}/{} ", app.cursor + 1, app.flat_lines.len()), app.theme.status_bar),
     ]);
 
@@ -512,8 +623,9 @@ fn render_command_line(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         _ => {
             let hints = match &app.mode {
-                Mode::Normal => "q:quit  V:visual  c:comment  /:search  ]/[:hunk  H/L:file  h/l:side  e:filelist  E:comments  F:focus",
-                Mode::VisualLine { .. } => "c:comment  Esc:cancel  j/k:extend",
+                Mode::Normal => "q:quit  V:visual  yy:yank  ^T:tmux  c:comment  /:search  ]/[:hunk  H/L:file  h/l:side  e:filelist  E:comments  F:focus",
+                Mode::VisualLine { .. } => "y:yank  ^T:tmux  c:comment  Esc:cancel  j/k:extend",
+                Mode::TmuxPanePick => "j/k:move  Enter:send  Esc:cancel",
                 _ => "",
             };
             Line::from(Span::styled(hints, app.theme.border))

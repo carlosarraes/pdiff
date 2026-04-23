@@ -4,7 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::annotations::model::Annotation;
-use crate::diff::model::{DiffFile, DiffLine};
+use crate::diff::model::{DiffFile, DiffLine, LineType};
 use crate::ui::highlight::Highlighter;
 use crate::ui::theme::Theme;
 use crate::vim::mode::Mode;
@@ -50,6 +50,12 @@ pub struct App {
     pub show_file_list: bool,
     pub show_comments: bool,
     pub focus_mode: bool,
+    pub toast: Option<String>,
+    pub tmux_panes: Vec<crate::tmux::TmuxPane>,
+    pub tmux_cursor: usize,
+    pub tmux_last_target: Option<String>,
+    pub tmux_pending_text: String,
+    pub tmux_save_annotation_on_send: bool,
 }
 
 impl App {
@@ -81,6 +87,12 @@ impl App {
             show_file_list: true,
             show_comments: false,
             focus_mode: false,
+            toast: None,
+            tmux_panes: Vec::new(),
+            tmux_cursor: 0,
+            tmux_last_target: None,
+            tmux_pending_text: String::new(),
+            tmux_save_annotation_on_send: false,
         }
     }
 
@@ -96,6 +108,13 @@ impl App {
 
     pub fn active_file_idx(&self) -> Option<usize> {
         self.flat_lines.get(self.cursor).map(|fl| fl.file_idx)
+    }
+
+    pub fn line_hidden_on_side(&self, line: &DiffLine) -> bool {
+        match self.focus_side {
+            Side::Left => line.kind == LineType::Addition,
+            Side::Right => line.kind == LineType::Deletion,
+        }
     }
 
     fn clamp_cursor(&mut self) {
@@ -121,8 +140,6 @@ impl App {
     }
 
     pub fn rendered_rows_between(&self, from: usize, to: usize) -> usize {
-        use crate::diff::model::LineType;
-
         if self.flat_lines.is_empty() || from >= self.flat_lines.len() {
             return 0;
         }
@@ -130,7 +147,6 @@ impl App {
         let mut last_file: Option<usize> = None;
         let mut last_hunk: Option<(usize, usize)> = None;
         let end = to.min(self.flat_lines.len() - 1);
-        let is_left = self.focus_side == Side::Left;
 
         for (i, fl) in self.flat_lines[from..=end].iter().enumerate() {
             let flat_idx = from + i;
@@ -138,16 +154,17 @@ impl App {
             // In focus mode, skip lines hidden by the renderer
             if self.focus_mode {
                 if let Some(line) = self.get_line(flat_idx) {
-                    let hidden = (is_left && line.kind == LineType::Addition)
-                        || (!is_left && line.kind == LineType::Deletion);
-                    if hidden {
+                    if self.line_hidden_on_side(line) {
                         continue;
                     }
                 }
             }
 
             if last_file != Some(fl.file_idx) {
-                rows += 1;
+                if last_file.is_some() {
+                    rows += 1; // visual file separator
+                }
+                rows += 1; // file header
                 last_file = Some(fl.file_idx);
                 last_hunk = None;
             }
@@ -175,6 +192,7 @@ impl App {
                 let end = (*anchor).max(self.cursor);
                 Some((start, end))
             }
+            Mode::CommentInsert | Mode::CommentNormal => self.comment_selection,
             _ => None,
         }
     }
@@ -204,19 +222,23 @@ impl App {
             Mode::CommentInsert => self.handle_comment_insert_key(key),
             Mode::CommentNormal => self.handle_comment_normal_key(key),
             Mode::Command => self.handle_command_key(key),
+            Mode::TmuxPanePick => self.handle_tmux_pick_key(key),
             _ => self.handle_nav_key(key, content_height),
         }
     }
 
     fn handle_nav_key(&mut self, key: KeyEvent, viewport_height: usize) {
         let half_page = viewport_height / 2;
+        self.toast = None;
 
         if !self.pending_keys.is_empty() {
             if let KeyCode::Char(c) = key.code {
                 let first = self.pending_keys[0];
                 self.pending_keys.clear();
-                if first == 'g' && c == 'g' {
-                    self.cursor = 0;
+                match (first, c) {
+                    ('g', 'g') => self.cursor = 0,
+                    ('y', 'y') => self.perform_yank(self.cursor, self.cursor),
+                    _ => {}
                 }
             } else {
                 self.pending_keys.clear();
@@ -227,12 +249,15 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.cursor < self.flat_lines.len().saturating_sub(1) {
-                    self.cursor += 1;
-                }
+                let last = self.flat_lines.len().saturating_sub(1);
+                self.cursor = self
+                    .next_interesting_line(self.cursor, true)
+                    .unwrap_or_else(|| (self.cursor + 1).min(last));
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.cursor = self.cursor.saturating_sub(1);
+                self.cursor = self
+                    .next_interesting_line(self.cursor, false)
+                    .unwrap_or_else(|| self.cursor.saturating_sub(1));
             }
             KeyCode::Char('h') => {
                 self.focus_side = Side::Left;
@@ -280,6 +305,40 @@ impl App {
                 self.mode = Mode::VisualLine {
                     anchor: self.cursor,
                 };
+            }
+            KeyCode::Char('y') if matches!(self.mode, Mode::VisualLine { .. }) => {
+                if let Some((start, end)) = self.selection_range() {
+                    self.perform_yank(start, end);
+                }
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('y') if matches!(self.mode, Mode::Normal) => {
+                self.pending_keys.push('y');
+            }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(self.mode, Mode::Normal) =>
+            {
+                self.tmux_last_target = None;
+                let text = self.yank_text(self.cursor, self.cursor);
+                self.request_tmux_send(text, false);
+            }
+            KeyCode::Char('t')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(self.mode, Mode::Normal) =>
+            {
+                let text = self.yank_text(self.cursor, self.cursor);
+                self.request_tmux_send(text, false);
+            }
+            KeyCode::Char('t')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(self.mode, Mode::VisualLine { .. }) =>
+            {
+                if let Some((start, end)) = self.selection_range() {
+                    let text = self.yank_text(start, end);
+                    self.request_tmux_send(text, false);
+                }
             }
             KeyCode::Char('c')
                 if matches!(self.mode, Mode::Normal | Mode::VisualLine { .. }) =>
@@ -342,6 +401,10 @@ impl App {
                 } else {
                     self.mode = Mode::CommentNormal;
                 }
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let text = self.build_comment_context();
+                self.request_tmux_send(text, true);
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.comment_buf.push('\n');
@@ -570,27 +633,227 @@ impl App {
         }
     }
 
-    fn snap_cursor_to_visible_line(&mut self) {
-        use crate::diff::model::LineType;
-        let is_left = self.focus_side == Side::Left;
+    // Build the text to copy when the user yanks a visual-line selection.
+    // Called with an inclusive range `start..=end` of flat_line indices.
+    //
+    // TODO (design choice): pick what gets yanked.
+    //   Option 1 — "what you see" (current default):
+    //     Skip lines hidden on the current side (Additions when Left, Deletions when Right).
+    //     Emit raw `content` (no +/- prefix). Best for pasting runnable code.
+    //
+    //   Option 2 — "diff text":
+    //     Include every line with its prefix: `format!("{}{}", line.kind.prefix(), line.content)`.
+    //     Paste-able into a .patch file or a Markdown diff code block.
+    //
+    //   Option 3 — "both sides":
+    //     Yield old+new as two blocks separated by `---`. Niche but useful for comparisons.
+    //
+    // Swap bodies freely — the keybind handler just consumes the returned String.
+    fn perform_yank(&mut self, start: usize, end: usize) {
+        let text = self.yank_text(start, end);
+        if text.is_empty() {
+            self.toast = Some("nothing to yank".to_string());
+            return;
+        }
+        let line_count = text.lines().count();
+        self.toast = Some(match crate::clipboard::copy_to_clipboard(&text) {
+            Ok(()) => format!("yanked {} line{}", line_count, if line_count == 1 { "" } else { "s" }),
+            Err(e) => format!("yank failed: {}", e),
+        });
+    }
 
+    fn request_tmux_send(&mut self, text: String, save_annotation: bool) {
+        if text.trim().is_empty() {
+            self.toast = Some("nothing to send".to_string());
+            return;
+        }
+        if !crate::tmux::in_tmux() {
+            self.toast = Some("not in tmux".to_string());
+            return;
+        }
+
+        self.tmux_pending_text = text;
+        self.tmux_save_annotation_on_send = save_annotation;
+
+        // Try direct-send to remembered target
+        if let Some(target) = self.tmux_last_target.clone() {
+            if crate::tmux::pane_exists(&target) {
+                self.dispatch_tmux_send(&target);
+                return;
+            }
+            // Stale target: fall through to picker with a toast
+            self.tmux_last_target = None;
+            self.toast = Some("last target gone, pick again".to_string());
+        }
+
+        self.open_tmux_picker();
+    }
+
+    fn open_tmux_picker(&mut self) {
+        let panes = match crate::tmux::list_panes() {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast = Some(format!("tmux list failed: {}", e));
+                self.tmux_pending_text.clear();
+                self.tmux_save_annotation_on_send = false;
+                return;
+            }
+        };
+        if panes.is_empty() {
+            self.toast = Some("no other panes".to_string());
+            self.tmux_pending_text.clear();
+            self.tmux_save_annotation_on_send = false;
+            return;
+        }
+        self.tmux_panes = panes;
+        self.tmux_cursor = 0;
+        self.mode = Mode::TmuxPanePick;
+    }
+
+    fn dispatch_tmux_send(&mut self, target: &str) {
+        let text = std::mem::take(&mut self.tmux_pending_text);
+        let save = std::mem::take(&mut self.tmux_save_annotation_on_send);
+        match crate::tmux::send_to_pane(target, &text) {
+            Ok(()) => {
+                self.tmux_last_target = Some(target.to_string());
+                self.toast = Some(format!("sent {} byte{} to {}",
+                    text.len(),
+                    if text.len() == 1 { "" } else { "s" },
+                    target,
+                ));
+                if save {
+                    self.submit_comment();
+                }
+            }
+            Err(e) => {
+                self.toast = Some(format!("send failed: {}", e));
+            }
+        }
+        self.tmux_panes.clear();
+        self.tmux_cursor = 0;
+        self.mode = Mode::Normal;
+    }
+
+    fn cancel_tmux_picker(&mut self) {
+        self.tmux_panes.clear();
+        self.tmux_cursor = 0;
+        self.tmux_pending_text.clear();
+        self.tmux_save_annotation_on_send = false;
+        self.mode = Mode::Normal;
+    }
+
+    fn handle_tmux_pick_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.cancel_tmux_picker(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.tmux_cursor + 1 < self.tmux_panes.len() {
+                    self.tmux_cursor += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.tmux_cursor = self.tmux_cursor.saturating_sub(1);
+            }
+            KeyCode::Char('g') => self.tmux_cursor = 0,
+            KeyCode::Char('G') => {
+                self.tmux_cursor = self.tmux_panes.len().saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(pane) = self.tmux_panes.get(self.tmux_cursor).cloned() {
+                    self.dispatch_tmux_send(&pane.id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Build the text sent to tmux from CommentInsert: file:line header +
+    // fenced code block of the selected lines + the user's comment.
+    // Falls back to raw comment_buf if no selection range is available.
+    fn build_comment_context(&self) -> String {
+        let Some((start, end)) = self.comment_selection else {
+            return self.comment_buf.clone();
+        };
+        let end = end.min(self.flat_lines.len().saturating_sub(1));
+        let Some(start_fl) = self.flat_lines.get(start).copied() else {
+            return self.comment_buf.clone();
+        };
+        let file_path = self
+            .files
+            .get(start_fl.file_idx)
+            .map(|f| f.path.as_str())
+            .unwrap_or("?");
+
+        let is_left = self.focus_side == Side::Left;
+        let mut min_line: Option<u32> = None;
+        let mut max_line: Option<u32> = None;
+        let mut code = String::new();
+
+        for i in start..=end {
+            let Some(line) = self.get_line(i) else { continue };
+            if self.line_hidden_on_side(line) {
+                continue;
+            }
+            let lineno = if is_left { line.old_lineno } else { line.new_lineno };
+            if let Some(n) = lineno {
+                min_line = Some(min_line.map_or(n, |m| m.min(n)));
+                max_line = Some(max_line.map_or(n, |m| m.max(n)));
+            }
+            code.push_str(&line.content);
+            code.push('\n');
+        }
+
+        let range = match (min_line, max_line) {
+            (Some(a), Some(b)) if a != b => format!(":{}-{}", a, b),
+            (Some(a), _) => format!(":{}", a),
+            _ => String::new(),
+        };
+
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        format!(
+            "`{}{}`:\n\n```{}\n{}```\n\n{}",
+            file_path, range, ext, code, self.comment_buf,
+        )
+    }
+
+    fn yank_text(&self, start: usize, end: usize) -> String {
+        let end = end.min(self.flat_lines.len().saturating_sub(1));
+        let mut out = String::new();
+        for i in start..=end {
+            let Some(line) = self.get_line(i) else { continue };
+            if self.line_hidden_on_side(line) {
+                continue;
+            }
+            out.push_str(&line.content);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn next_interesting_line(&self, from: usize, forward: bool) -> Option<usize> {
+        let skippable = |i: usize| {
+            self.get_line(i).is_some_and(|l| {
+                l.content.trim().is_empty() || self.line_hidden_on_side(l)
+            })
+        };
+        if forward {
+            (from + 1..self.flat_lines.len()).find(|&i| !skippable(i))
+        } else {
+            (0..from).rev().find(|&i| !skippable(i))
+        }
+    }
+
+    fn snap_cursor_to_visible_line(&mut self) {
         if let Some(line) = self.get_line(self.cursor) {
-            let hidden = (is_left && line.kind == LineType::Addition)
-                || (!is_left && line.kind == LineType::Deletion);
-            if hidden {
-                // Search forward first, then backward
-                let forward = (self.cursor + 1..self.flat_lines.len()).find(|&i| {
-                    self.get_line(i).is_some_and(|l| {
-                        !((is_left && l.kind == LineType::Addition)
-                            || (!is_left && l.kind == LineType::Deletion))
-                    })
-                });
-                let backward = (0..self.cursor).rev().find(|&i| {
-                    self.get_line(i).is_some_and(|l| {
-                        !((is_left && l.kind == LineType::Addition)
-                            || (!is_left && l.kind == LineType::Deletion))
-                    })
-                });
+            if self.line_hidden_on_side(line) {
+                let visible = |i: usize| {
+                    self.get_line(i).is_some_and(|l| !self.line_hidden_on_side(l))
+                };
+                let forward = (self.cursor + 1..self.flat_lines.len()).find(|&i| visible(i));
+                let backward = (0..self.cursor).rev().find(|&i| visible(i));
                 self.cursor = forward.or(backward).unwrap_or(self.cursor);
             }
         }
