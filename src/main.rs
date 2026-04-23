@@ -3,6 +3,7 @@ mod app;
 mod clipboard;
 mod diff;
 mod pi_extension;
+mod tmux;
 mod ui;
 mod vim;
 

@@ -85,6 +85,7 @@ impl Theme {
             | crate::vim::mode::Mode::VisualBlock { .. } => self.mode_visual,
             crate::vim::mode::Mode::CommentInsert
             | crate::vim::mode::Mode::CommentNormal => self.mode_comment,
+            crate::vim::mode::Mode::TmuxPanePick => self.mode_visual,
         }
     }
 }

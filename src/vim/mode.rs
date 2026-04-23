@@ -6,6 +6,7 @@ pub enum Mode {
     CommentInsert,
     CommentNormal,
     Command,
+    TmuxPanePick,
 }
 
 impl Mode {
@@ -17,6 +18,7 @@ impl Mode {
             Mode::CommentInsert => "COMMENT",
             Mode::CommentNormal => "COMMENT",
             Mode::Command => "COMMAND",
+            Mode::TmuxPanePick => "TMUX",
         }
     }
 
