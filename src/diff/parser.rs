@@ -1,8 +1,27 @@
 use super::model::{DiffFile, DiffLine, Hunk, LineType};
 
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if matches!(c, '\x40'..='\x7e') {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
+    let stripped = strip_ansi(input);
     let mut files = Vec::new();
-    let lines: Vec<&str> = input.lines().collect();
+    let lines: Vec<&str> = stripped.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
@@ -536,5 +555,27 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn test_patch_path_quoted() {
         assert_eq!(parse_patch_path(r#""a/foo\tbar.txt""#, "a/"), "foo\tbar.txt");
+    }
+
+    #[test]
+    fn test_ansi_colored_diff() {
+        // gh pr diff emits SGR escape sequences when GH_PAGER is set.
+        // The parser must strip them before line-prefix matching.
+        let input = "\x1b[1;37mdiff --git a/src/main.rs b/src/main.rs\x1b[m\n\
+                     \x1b[1;37mindex abc1234..def5678 100644\x1b[m\n\
+                     \x1b[1;37m--- a/src/main.rs\x1b[m\n\
+                     \x1b[1;37m+++ b/src/main.rs\x1b[m\n\
+                     \x1b[36m@@ -1,2 +1,2 @@\x1b[m\n\
+                     \x1b[31m-old\x1b[m\n\
+                     \x1b[32m+new\x1b[m\n";
+        let files = parse_unified_diff(input);
+        assert_eq!(files.len(), 1, "expected 1 file, got {}", files.len());
+        assert_eq!(files[0].path, "src/main.rs");
+        assert_eq!(files[0].hunks.len(), 1);
+        let hunk = &files[0].hunks[0];
+        assert_eq!(hunk.lines[0].kind, LineType::Deletion);
+        assert_eq!(hunk.lines[0].content, "old");
+        assert_eq!(hunk.lines[1].kind, LineType::Addition);
+        assert_eq!(hunk.lines[1].content, "new");
     }
 }
