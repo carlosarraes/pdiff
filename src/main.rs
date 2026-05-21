@@ -18,10 +18,19 @@ use app::App;
 use diff::parser::parse_unified_diff;
 
 #[derive(Parser)]
-#[command(name = "pdiff", about = "Terminal diff reviewer with vim motions")]
+#[command(
+    name = "pdiff",
+    version,
+    about = "Terminal diff reviewer with vim motions",
+    disable_version_flag = true,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Print version and exit
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
 
     /// Read diff from file instead of stdin
     #[arg(short, long)]
