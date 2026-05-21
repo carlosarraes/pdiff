@@ -9,3 +9,6 @@ crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 syntect = "5"
 dirs = "6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

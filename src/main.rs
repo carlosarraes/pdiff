@@ -77,6 +77,9 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
+    #[cfg(unix)]
+    replace_stdin_with_tty()?;
+
     let app = App::new(files);
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
@@ -111,6 +114,24 @@ fn main() -> io::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Replaces fd 0 with a freshly opened /dev/tty so crossterm can read keyboard events
+/// even when pdiff was launched via a pipe (e.g. `gh pr diff <num> | pdiff`).
+/// Without this, crossterm tries to open /dev/tty with read+write itself, which can
+/// fail on some macOS/tmux setups with ENXIO.
+#[cfg(unix)]
+fn replace_stdin_with_tty() -> io::Result<()> {
+    if io::stdin().is_terminal() {
+        return Ok(());
+    }
+    use std::os::unix::io::AsRawFd;
+    let tty = fs::OpenOptions::new().read(true).open("/dev/tty")?;
+    let result = unsafe { libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
